@@ -20,6 +20,22 @@ On first use the CLI creates the `tasks` repo and board on the active `gh` accou
 
 Requirements: `gh` logged in with the `project` scope (`gh auth refresh -s project`) and `jq`.
 
+## Sharing with other accounts
+
+The board owner can give any GitHub account write access to the repo and the board:
+
+```bash
+bin/gh-tasks share OTHER_LOGIN
+```
+
+If that account is also logged in to `gh` on the same machine, the invite is accepted automatically. Each account needs the `project` scope once (`gh auth switch -u OTHER_LOGIN && gh auth refresh -s project`). The CLI then works with whichever account is active, as long as it has write access.
+
+On a machine where only the other account is logged in, point setup at the owner's board:
+
+```bash
+bin/gh-tasks setup --owner OWNER_LOGIN
+```
+
 ## Update
 
 Every commit pushed to `main` is a new version. To pull it:

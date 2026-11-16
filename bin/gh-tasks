@@ -21,7 +21,9 @@ gh-tasks: personal GitHub task board (repo "tasks" + Project "tasks")
 
 Setup / health  (setup runs automatically on first use)
   gh-tasks setup                         create repo, board and statuses; write config (idempotent)
+  gh-tasks setup --owner LOGIN           use a board shared by LOGIN (from another account)
   gh-tasks check                         verify gh account, token scope, config and repo access
+  gh-tasks share LOGIN                   give another account write access to repo + board (owner only)
   gh-tasks project                       print the project name detected from the current dir
 
 Tasks  (P = project name; default: detected from the current dir)
@@ -62,11 +64,14 @@ load_config() {
   PURL=$(cfg .project_url)
 }
 
-# Fail fast if the active gh account is not the configured owner.
+active_login() { gh api user --jq .login 2>/dev/null || echo "(not logged in)"; }
+
+# Fail fast unless the active gh account can write to the tasks repo
+# (the owner, or an account added with: gh-tasks share <login>).
 require_account() {
-  local active
-  active=$(gh api user --jq .login 2>/dev/null) || die "gh is not authenticated. Run: gh auth login"
-  [[ "$active" == "$OWNER" ]] || die "active gh account is '$active' but the board belongs to '$OWNER'. Run: gh auth switch -u $OWNER"
+  local push
+  push=$(gh api "repos/$REPO" --jq .permissions.push 2>/dev/null || true)
+  [[ "$push" == "true" ]] || die "active gh account '$(active_login)' has no write access to $REPO. Switch with: gh auth switch -u $OWNER  (or have $OWNER run: gh-tasks share <login>)"
 }
 
 detect_project() {
@@ -138,31 +143,43 @@ is_int() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "expected an issue number, got '${1
 
 cmd_setup() {
   need gh; need jq
-  local owner num pid fields status_field missing items opts_json
-  owner=$(gh api user --jq .login) || die "gh is not authenticated. Run: gh auth login"
-  echo "Setting up for GitHub account: $owner"
+  local active owner="" own num pid fields status_field missing items opts_json
+  while (($#)); do
+    case "$1" in
+      --owner) owner="$2"; shift 2 ;;
+      *) die "setup: unknown option '$1'" ;;
+    esac
+  done
+  active=$(gh api user --jq .login) || die "gh is not authenticated. Run: gh auth login"
+  [[ -n "$owner" ]] || owner="${GH_TASKS_OWNER:-$active}"
+  own=0; [[ "$owner" == "$active" ]] && own=1
+  echo "Setting up board of $owner (gh account: $active)"
   gh auth status --active 2>&1 | grep -q "'project'" \
     || die "token lacks the 'project' scope. Run: gh auth refresh -s project"
 
   if gh repo view "$owner/$REPO_NAME" >/dev/null 2>&1; then
     echo "- repo $owner/$REPO_NAME exists"
-  else
+  elif (( own )); then
     gh repo create "$REPO_NAME" --private --add-readme --description "Personal task board" >/dev/null
     echo "- created private repo $owner/$REPO_NAME"
+  else
+    die "$owner/$REPO_NAME is not shared with $active. Have $owner run: gh-tasks share $active"
   fi
   [[ "$(gh repo view "$owner/$REPO_NAME" --json isPrivate --jq .isPrivate)" == "true" ]] \
     || echo "  WARNING: $owner/$REPO_NAME is PUBLIC"
 
   num=$(gh project list --owner "$owner" -L 200 --format json \
         --jq ".projects[] | select(.title==\"$PROJECT_TITLE\") | .number" | head -1)
-  if [[ -z "$num" ]]; then
+  if [[ -n "$num" ]]; then
+    echo "- project \"$PROJECT_TITLE\" exists (#$num)"
+  elif (( own )); then
     num=$(gh project create --owner "$owner" --title "$PROJECT_TITLE" --format json --jq .number)
     echo "- created project \"$PROJECT_TITLE\" (#$num)"
   else
-    echo "- project \"$PROJECT_TITLE\" exists (#$num)"
+    die "board \"$PROJECT_TITLE\" of $owner is not shared with $active. Have $owner run: gh-tasks share $active"
   fi
   pid=$(gh project view "$num" --owner "$owner" --format json --jq .id)
-  gh project link "$num" --owner "$owner" --repo "$owner/$REPO_NAME" >/dev/null 2>&1 || true
+  (( own )) && { gh project link "$num" --owner "$owner" --repo "$owner/$REPO_NAME" >/dev/null 2>&1 || true; }
 
   fields=$(gh project field-list "$num" --owner "$owner" -L 100 --format json)
   status_field=$(jq -c '.fields[] | select(.name=="Status")' <<<"$fields")
@@ -172,7 +189,9 @@ cmd_setup() {
   for s in "${STATUSES[@]}"; do
     jq -e --arg s "$s" '.options | map(.name) | index($s)' <<<"$status_field" >/dev/null || missing=1
   done
-  if (( missing )); then
+  if (( missing )) && (( ! own )); then
+    die "the board is missing some of: ${STATUSES[*]}. Have $owner run: gh-tasks setup"
+  elif (( missing )); then
     items=$(gh project item-list "$num" --owner "$owner" -L 1 --format json --jq '.items | length')
     if [[ "$items" == "0" ]]; then
       opts_json='[{"name":"Todo","color":"GRAY","description":""},{"name":"In Progress","color":"YELLOW","description":""},{"name":"Blocked","color":"RED","description":""},{"name":"Done","color":"GREEN","description":""}]'
@@ -204,7 +223,7 @@ cmd_check() {
   need gh; need jq
   load_config
   require_account
-  echo "ok  account: $OWNER"
+  echo "ok  account: $(active_login) (board owner: $OWNER)"
   gh auth status --active 2>&1 | grep -q "'project'" \
     || die "token lacks the 'project' scope. Run: gh auth refresh -s project"
   echo "ok  token has 'project' scope"
@@ -410,6 +429,38 @@ cmd_open() {
 
 cmd_project() { detect_project; echo; }
 
+# Give another GitHub account write access to the repo and the board.
+# If that account is also logged in to gh on this machine, accept the invite for it.
+cmd_share() {
+  local user="${1:-}" uid tok inv id
+  [[ -n "$user" ]] || die "share: GitHub login required"
+  load_config
+  [[ "$(active_login)" == "$OWNER" ]] || die "share must run as $OWNER. Run: gh auth switch -u $OWNER"
+  uid=$(gh api "users/$user" --jq .node_id 2>/dev/null) || die "GitHub user '$user' not found"
+
+  gh api -X PUT "repos/$REPO/collaborators/$user" -f permission=push >/dev/null
+  echo "- $user invited to $REPO (write)"
+  jq -n --arg pid "$PID" --arg uid "$uid" '{
+    query: "mutation($pid:ID!,$uid:ID!){updateProjectV2Collaborators(input:{projectId:$pid,collaborators:[{userId:$uid,role:WRITER}]}){collaborators{totalCount}}}",
+    variables: {pid:$pid, uid:$uid}}' | gh api graphql --input - >/dev/null
+  echo "- $user added to the board (writer)"
+
+  if tok=$(gh auth token --user "$user" 2>/dev/null) && [[ -n "$tok" ]]; then
+    inv=$(GH_TOKEN="$tok" gh api user/repository_invitations \
+          --jq ".[] | select(.repository.full_name==\"$REPO\") | .id" 2>/dev/null || true)
+    for id in $inv; do
+      GH_TOKEN="$tok" gh api -X PATCH "user/repository_invitations/$id" >/dev/null
+      echo "- invite accepted as $user"
+    done
+    if ! GH_TOKEN="$tok" gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | grep -qw project; then
+      echo "! $user's gh token lacks the 'project' scope. Run once:"
+      echo "    gh auth switch -u $user && gh auth refresh -s project; gh auth switch -u $OWNER"
+    fi
+  else
+    echo "- $user must accept the invite: https://github.com/$REPO/invitations"
+  fi
+}
+
 # ---------- dispatch ----------
 
 need gh; need jq
@@ -428,6 +479,7 @@ case "$cmd" in
   context-add) cmd_context_add "$@" ;;
   context-set) cmd_context_set "$@" ;;
   open) cmd_open "$@" ;;
+  share) cmd_share "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 1 ;;
 esac
