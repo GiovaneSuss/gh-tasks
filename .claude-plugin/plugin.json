@@ -1,0 +1,6 @@
+{
+  "name": "ghtasks",
+  "description": "Personal GitHub task board: create, move and comment on tasks, keep per-project context.",
+  "author": { "name": "GiovaneSuss" },
+  "repository": "https://github.com/GiovaneSuss/gh-tasks"
+}

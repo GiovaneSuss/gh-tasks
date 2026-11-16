@@ -1,6 +1,6 @@
 # gh-tasks
 
-Personal task board on GitHub, driven from Claude Code.
+Personal task board on GitHub, driven from Claude Code. Ships as the Claude Code plugin `ghtasks`.
 
 - Issues live in a private repo named `tasks` on your account.
 - The board is a GitHub Project named `tasks` with the statuses Todo, In Progress, Blocked and Done.
@@ -9,46 +9,58 @@ Personal task board on GitHub, driven from Claude Code.
 
 ## Install
 
-Copy the skills into your global skills folder:
-
 ```bash
-mkdir -p ~/.claude/skills && curl -fsSL https://github.com/GiovaneSuss/gh-tasks/archive/refs/heads/main.tar.gz | tar -xz -C ~/.claude/skills --strip-components=2 gh-tasks-main/skills
+claude plugin marketplace add GiovaneSuss/gh-tasks
+claude plugin install ghtasks@ghtasks
 ```
 
-That's it. On first use the CLI creates the `tasks` repo and board on the active `gh` account and saves `~/.config/gh-tasks/config.json`.
+Or inside Claude Code: `/plugin marketplace add GiovaneSuss/gh-tasks`, then `/plugin install ghtasks@ghtasks`.
+
+On first use the CLI creates the `tasks` repo and board on the active `gh` account and saves `~/.config/gh-tasks/config.json`.
 
 Requirements: `gh` logged in with the `project` scope (`gh auth refresh -s project`) and `jq`.
 
-To update, run the same command again. To uninstall:
+## Update
+
+Every commit pushed to `main` is a new version. To pull it:
 
 ```bash
-rm -rf ~/.claude/skills/create-task ~/.claude/skills/tasks-open ~/.claude/skills/tasks ~/.config/gh-tasks
+claude plugin marketplace update ghtasks && claude plugin update ghtasks@ghtasks
 ```
 
-Your repo and board on GitHub are never deleted.
+Or turn on auto-update once: `/plugin` → Marketplaces → ghtasks → Enable auto-update.
 
 ## Skills
 
 | Slash command | What it does |
 |---|---|
-| `/create-task <what>` | Creates an issue in Todo, tagged with the current project |
-| `/tasks-open [here\|name]` | Opens the board in the browser |
-| `/tasks ...` | Lists, moves, comments and keeps the project context |
+| `/ghtasks:create-task <what>` | Creates an issue in Todo, tagged with the current project |
+| `/ghtasks:tasks-open [here\|name]` | Opens the board in the browser |
+| `/ghtasks:tasks ...` | Lists, moves, comments and keeps the project context |
 
-`/create-task` and `/tasks-open` are user-only (`disable-model-invocation`), so they cost no context until you call them.
+`create-task` and `tasks-open` are user-only (`disable-model-invocation`), so they cost no context until you call them.
+
+## Layout
+
+```
+.claude-plugin/plugin.json        plugin manifest
+.claude-plugin/marketplace.json   this repo is its own marketplace
+bin/gh-tasks                      the CLI the skills run
+skills/<name>/SKILL.md            one folder per skill
+```
+
+To add a skill, create `skills/<name>/SKILL.md` and push.
 
 ## CLI
 
-The skills only run the bundled CLI at `~/.claude/skills/tasks/bin/gh-tasks`, never raw `gh`. To use it yourself:
-
-```bash
-bash ~/.claude/skills/tasks/bin/gh-tasks help
-```
+The skills only run `bin/gh-tasks`, never raw `gh`. `bin/gh-tasks help` lists every command.
 
 ## Developing
 
-Symlink the skill folders instead of copying, so edits apply immediately:
+Load the plugin from your checkout for one session, without installing:
 
 ```bash
-for d in skills/*/; do ln -sfn "$PWD/$d" ~/.claude/skills/"$(basename "$d")"; done
+claude --plugin-dir .
 ```
+
+Check the manifests with `claude plugin validate .`.

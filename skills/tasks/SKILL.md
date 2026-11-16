@@ -1,10 +1,10 @@
 ---
 name: tasks
-description: Manage the user's personal GitHub task board (repo "tasks"). Use to list tasks, move a task between Todo / In Progress / Blocked / Done, comment on a task, re-tag its project, or read/update a project's running context. Triggers on "/tasks", "my tasks", "move #12 to done", "mark it blocked", "comment on the task", "project context".
+description: Manage the user's personal GitHub task board (repo "tasks"). Use to list tasks, move a task between Todo / In Progress / Blocked / Done, comment on a task, re-tag its project, or read/update a project's running context. Triggers on "my tasks", "move #12 to done", "mark it blocked", "comment on the task", "project context".
 argument-hint: "[list | move N status | comment N | context ...]"
 ---
 
-All operations go through the bundled CLI. In every command below, `gh-tasks` means `bash ~/.claude/skills/tasks/bin/gh-tasks` (always type the full form). Use only these commands, copied as written.
+All operations go through the bundled CLI. In every command below, `gh-tasks` means `bash "${CLAUDE_PLUGIN_ROOT}/bin/gh-tasks"` (always type the full form). Use only these commands, copied as written.
 Never call `gh` directly and never debug the CLI: if a command fails, show its error line to the user and stop.
 The CLI checks the gh account itself. P defaults to the project detected from the current directory.
 
