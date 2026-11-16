@@ -7,6 +7,6 @@ argument-hint: "[here | project-name]"
 
 Run exactly one command and reply only with the URL it prints:
 
-- no arguments: `gh-tasks open`
-- `here`: `gh-tasks open --here`
-- anything else: `gh-tasks open -p "$ARGUMENTS"`
+- no arguments: `bash ~/.claude/skills/tasks/bin/gh-tasks open`
+- `here`: `bash ~/.claude/skills/tasks/bin/gh-tasks open --here`
+- anything else: `bash ~/.claude/skills/tasks/bin/gh-tasks open -p "$ARGUMENTS"`

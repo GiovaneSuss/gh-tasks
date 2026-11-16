@@ -11,7 +11,7 @@ Create one task from `$ARGUMENTS` (plus the current conversation if it adds need
 2. Run exactly this, filling in TITLE and BODY. Do not run any other gh command and do not debug: if it fails, show the error line to the user and stop.
 
 ```bash
-gh-tasks create -t "TITLE" -b - <<'EOF'
+bash ~/.claude/skills/tasks/bin/gh-tasks create -t "TITLE" -b - <<'EOF'
 BODY
 EOF
 ```

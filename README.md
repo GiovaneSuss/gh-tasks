@@ -9,20 +9,23 @@ Personal task board on GitHub, driven from Claude Code.
 
 ## Install
 
-```bash
-./install.sh        # symlinks skills into ~/.claude/skills and the CLI into ~/.local/bin
-gh-tasks setup      # once: creates the repo, board and statuses, writes ~/.config/gh-tasks/config.json
-gh-tasks check      # verifies account, token scope and access
-```
-
-Requires `gh` (logged in, with the `project` scope: `gh auth refresh -s project`) and `jq`.
-
-Maintenance is plain scripts, no Claude needed:
+Copy the skills into your global skills folder:
 
 ```bash
-./update.sh            # git pull (if this is a clone) and relink
-./uninstall.sh         # remove the links (add --purge to drop the config)
+mkdir -p ~/.claude/skills && curl -fsSL https://github.com/GiovaneSuss/gh-tasks/archive/refs/heads/main.tar.gz | tar -xz -C ~/.claude/skills --strip-components=2 gh-tasks-main/skills
 ```
+
+That's it. On first use the CLI creates the `tasks` repo and board on the active `gh` account and saves `~/.config/gh-tasks/config.json`.
+
+Requirements: `gh` logged in with the `project` scope (`gh auth refresh -s project`) and `jq`.
+
+To update, run the same command again. To uninstall:
+
+```bash
+rm -rf ~/.claude/skills/create-task ~/.claude/skills/tasks-open ~/.claude/skills/tasks ~/.config/gh-tasks
+```
+
+Your repo and board on GitHub are never deleted.
 
 ## Skills
 
@@ -36,12 +39,16 @@ Maintenance is plain scripts, no Claude needed:
 
 ## CLI
 
-`gh-tasks help` prints every command. Claude only runs these fixed commands, never raw `gh`.
-
-## Publishing later
-
-The layout follows the common `skills/<name>/SKILL.md` convention. Once this is pushed to GitHub, set `REPO_URL` in `install.sh` and install with:
+The skills only run the bundled CLI at `~/.claude/skills/tasks/bin/gh-tasks`, never raw `gh`. To use it yourself:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/gh-tasks/main/install.sh | bash
+bash ~/.claude/skills/tasks/bin/gh-tasks help
+```
+
+## Developing
+
+Symlink the skill folders instead of copying, so edits apply immediately:
+
+```bash
+for d in skills/*/; do ln -sfn "$PWD/$d" ~/.claude/skills/"$(basename "$d")"; done
 ```

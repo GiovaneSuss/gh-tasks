@@ -4,7 +4,7 @@ description: Manage the user's personal GitHub task board (repo "tasks"). Use to
 argument-hint: "[list | move N status | comment N | context ...]"
 ---
 
-All operations go through the `gh-tasks` CLI. Use only the commands below, copied as written.
+All operations go through the bundled CLI. In every command below, `gh-tasks` means `bash ~/.claude/skills/tasks/bin/gh-tasks` (always type the full form). Use only these commands, copied as written.
 Never call `gh` directly and never debug the CLI: if a command fails, show its error line to the user and stop.
 The CLI checks the gh account itself. P defaults to the project detected from the current directory.
 

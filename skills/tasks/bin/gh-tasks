@@ -9,7 +9,7 @@ set -euo pipefail
 REPO_NAME="tasks"
 PROJECT_TITLE="tasks"
 STATUSES=("Todo" "In Progress" "Blocked" "Done")
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gh-tasks"
+CONFIG_DIR="${GH_TASKS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh-tasks}"
 CONFIG="$CONFIG_DIR/config.json"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -19,7 +19,7 @@ usage() {
   cat <<'EOF'
 gh-tasks: personal GitHub task board (repo "tasks" + Project "tasks")
 
-Setup / health
+Setup / health  (setup runs automatically on first use)
   gh-tasks setup                         create repo, board and statuses; write config (idempotent)
   gh-tasks check                         verify gh account, token scope, config and repo access
   gh-tasks project                       print the project name detected from the current dir
@@ -50,7 +50,10 @@ EOF
 cfg() { jq -r "$1" "$CONFIG"; }
 
 load_config() {
-  [[ -f "$CONFIG" ]] || die "not configured. Run: gh-tasks setup"
+  if [[ ! -f "$CONFIG" ]]; then
+    echo "First run: setting up your board (one time)..." >&2
+    cmd_setup >&2
+  fi
   OWNER=$(cfg .owner)
   REPO="$OWNER/$REPO_NAME"
   PNUM=$(cfg .project_number)
