@@ -3,7 +3,7 @@
 Personal task board on GitHub, driven from Claude Code. Ships as the Claude Code plugin `ghtasks`.
 
 - Issues live in a private repo named `tasks` on your account.
-- The board is a GitHub Project named `tasks` with the statuses Todo, In Progress, Blocked and Done.
+- The board is a GitHub Project named `tasks` with the columns Todo, In Progress, Blocked, Review and Done. Review is for finished work waiting on someone else (PR review, QA, feedback). To change the columns, edit `STATUS_SPEC` in `bin/gh-tasks` and run `bin/gh-tasks setup`; existing tasks keep their status.
 - Each task has a `project:<name>` label. The name comes from the git repo you're working in.
 - Running context per project lives in `projects/<name>/CONTEXT.md` inside the `tasks` repo.
 

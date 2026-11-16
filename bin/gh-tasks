@@ -2,13 +2,14 @@
 # gh-tasks: fixed command set for a personal GitHub task board.
 # Issues live in the private repo <you>/tasks; the board is the GitHub Project "tasks".
 # Every task carries a label "project:<name>"; the board's Status field is
-# Todo | In Progress | Blocked | Done. Per-project context lives in
+# Todo | In Progress | Blocked | Review | Done. Per-project context lives in
 # projects/<name>/CONTEXT.md inside the tasks repo.
 set -euo pipefail
 
 REPO_NAME="tasks"
 PROJECT_TITLE="tasks"
-STATUSES=("Todo" "In Progress" "Blocked" "Done")
+# Board columns, in order. Running `gh-tasks setup` syncs the board to this list.
+STATUS_SPEC='[{"name":"Todo","color":"GRAY"},{"name":"In Progress","color":"YELLOW"},{"name":"Blocked","color":"RED"},{"name":"Review","color":"PURPLE"},{"name":"Done","color":"GREEN"}]'
 CONFIG_DIR="${GH_TASKS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh-tasks}"
 CONFIG="$CONFIG_DIR/config.json"
 
@@ -42,7 +43,7 @@ Context  (projects/<P>/CONTEXT.md in the tasks repo)
 Browser
   gh-tasks open [--here | -p P]          open the board (filtered by project if asked)
 
-STATUS: todo | in-progress | blocked | done (case-insensitive)
+STATUS: todo | in-progress | blocked | review | done (case-insensitive)
 "-" for -b / -m reads the text from stdin.
 EOF
 }
@@ -105,8 +106,9 @@ normalize_status() {
     todo) echo "Todo" ;;
     inprogress|doing|wip|progress) echo "In Progress" ;;
     blocked|block) echo "Blocked" ;;
+    review|inreview|pr|qa) echo "Review" ;;
     done|closed|finished) echo "Done" ;;
-    *) die "unknown status '$1' (use: todo | in-progress | blocked | done)" ;;
+    *) die "unknown status '$1' (use: todo | in-progress | blocked | review | done)" ;;
   esac
 }
 
@@ -185,27 +187,26 @@ cmd_setup() {
   status_field=$(jq -c '.fields[] | select(.name=="Status")' <<<"$fields")
   [[ -n "$status_field" ]] || die "board has no Status field"
 
-  missing=0
-  for s in "${STATUSES[@]}"; do
-    jq -e --arg s "$s" '.options | map(.name) | index($s)' <<<"$status_field" >/dev/null || missing=1
-  done
-  if (( missing )) && (( ! own )); then
-    die "the board is missing some of: ${STATUSES[*]}. Have $owner run: gh-tasks setup"
-  elif (( missing )); then
-    items=$(gh project item-list "$num" --owner "$owner" -L 1 --format json --jq '.items | length')
-    if [[ "$items" == "0" ]]; then
-      opts_json='[{"name":"Todo","color":"GRAY","description":""},{"name":"In Progress","color":"YELLOW","description":""},{"name":"Blocked","color":"RED","description":""},{"name":"Done","color":"GREEN","description":""}]'
-      jq -n --arg id "$(jq -r .id <<<"$status_field")" --argjson opts "$opts_json" '{
-        query: "mutation($id:ID!,$opts:[ProjectV2SingleSelectFieldOptionInput!]){updateProjectV2Field(input:{fieldId:$id,singleSelectOptions:$opts}){projectV2Field{... on ProjectV2SingleSelectField{id}}}}",
-        variables: {id:$id, opts:$opts}}' | gh api graphql --input - >/dev/null
-      echo "- set statuses: ${STATUSES[*]}"
-      fields=$(gh project field-list "$num" --owner "$owner" -L 100 --format json)
-      status_field=$(jq -c '.fields[] | select(.name=="Status")' <<<"$fields")
-    else
-      die "the board already has items and is missing some of: ${STATUSES[*]}. Add the missing Status options in the board UI, then re-run: gh-tasks setup"
-    fi
-  else
+  # Target options: STATUS_SPEC in order, reusing the ids of options that already
+  # exist (so tasks keep their status), then any extra options the board has.
+  opts_json=$(jq -c --argjson want "$STATUS_SPEC" '
+    .options as $cur
+    | ($want | map(.name as $n
+        | {name: $n, color: .color, description: ""}
+          + ((($cur | map(select(.name == $n)))[0].id) as $id | if $id then {id: $id} else {} end)))
+      + ($cur | map(select(.name as $n | ($want | map(.name) | index($n)) == null))
+              | map({id, name, color: "GRAY", description: ""}))' <<<"$status_field")
+  if [[ "$(jq -c 'map(.name)' <<<"$opts_json")" == "$(jq -c '.options | map(.name)' <<<"$status_field")" ]]; then
     echo "- statuses ok"
+  elif (( ! own )); then
+    die "the board's statuses are out of date. Have $owner run: gh-tasks setup"
+  else
+    jq -n --arg id "$(jq -r .id <<<"$status_field")" --argjson opts "$opts_json" '{
+      query: "mutation($id:ID!,$opts:[ProjectV2SingleSelectFieldOptionInput!]){updateProjectV2Field(input:{fieldId:$id,singleSelectOptions:$opts}){projectV2Field{... on ProjectV2SingleSelectField{id}}}}",
+      variables: {id:$id, opts:$opts}}' | gh api graphql --input - >/dev/null
+    echo "- set statuses: $(jq -r 'map(.name) | join(", ")' <<<"$opts_json")"
+    fields=$(gh project field-list "$num" --owner "$owner" -L 100 --format json)
+    status_field=$(jq -c '.fields[] | select(.name=="Status")' <<<"$fields")
   fi
 
   mkdir -p "$CONFIG_DIR"
@@ -271,8 +272,8 @@ cmd_list() {
   load_config; require_account
   (( all )) || [[ -n "$project" ]] || project=$(detect_project)
   gh project item-list "$PNUM" --owner "$OWNER" -L 1000 --format json | jq -r \
-    --arg label "project:$project" --argjson all "$all" --arg status "$status" --argjson closed "$closed" '
-    ["Todo","In Progress","Blocked","Done"] as $order
+    --arg label "project:$project" --argjson all "$all" --arg status "$status" --argjson closed "$closed" --argjson status_spec "$STATUS_SPEC" '
+    ($status_spec | map(.name)) as $order
     | [.items[]
        | select(.content.type == "Issue")
        | select($all == 1 or ((.labels // []) | index($label)))

@@ -1,6 +1,6 @@
 ---
 name: tasks
-description: Manage the user's personal GitHub task board (repo "tasks"). Use to list tasks, move a task between Todo / In Progress / Blocked / Done, comment on a task, re-tag its project, or read/update a project's running context. Triggers on "my tasks", "move #12 to done", "mark it blocked", "comment on the task", "project context".
+description: Manage the user's personal GitHub task board (repo "tasks"). Use to list tasks, move a task between Todo / In Progress / Blocked / Review / Done, comment on a task, re-tag its project, or read/update a project's running context. Triggers on "my tasks", "move #12 to done", "mark it blocked", "send it to review", "comment on the task", "project context".
 argument-hint: "[list | move N status | comment N | context ...]"
 ---
 
@@ -15,8 +15,9 @@ The CLI checks the gh account itself. P defaults to the project detected from th
 | Filter by status | `gh-tasks list -s blocked` |
 | Include done | `gh-tasks list --closed` |
 | Read one task | `gh-tasks show N` |
-| Move | `gh-tasks move N todo\|in-progress\|blocked\|done` |
+| Move | `gh-tasks move N todo\|in-progress\|blocked\|review\|done` |
 | Move + note why | `gh-tasks move N blocked -m "waiting on X"` |
+| Send to review | `gh-tasks move N review -m "PR: <url>"` |
 | Comment | `gh-tasks comment N -m "text"` |
 | Change title/project | `gh-tasks edit N -t "new title"` / `gh-tasks edit N -p other-project` |
 | Read project context | `gh-tasks context` |
@@ -25,6 +26,7 @@ The CLI checks the gh account itself. P defaults to the project detected from th
 
 For long text use stdin: `-m -` or `-b -` with a `<<'EOF'` heredoc.
 `done` closes the issue; moving out of `done` reopens it.
+Columns: Todo → In Progress → Review → Done, with Blocked for anything stuck. Use `review` when the work is finished but waits on someone else (PR review, QA, feedback); include the PR link or what is being reviewed in `-m`. Move to `done` only once the review passes.
 
 Context file (`projects/<P>/CONTEXT.md`): read it before planning work on a project. Append a short dated entry when a decision is made or a work session ends (what changed, what's next). Use `context-set` only when the user asks to rewrite or summarize it.
 
