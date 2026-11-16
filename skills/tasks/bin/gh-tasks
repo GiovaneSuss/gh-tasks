@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+# gh-tasks: fixed command set for a personal GitHub task board.
+# Issues live in the private repo <you>/tasks; the board is the GitHub Project "tasks".
+# Every task carries a label "project:<name>"; the board's Status field is
+# Todo | In Progress | Blocked | Done. Per-project context lives in
+# projects/<name>/CONTEXT.md inside the tasks repo.
+set -euo pipefail
+
+REPO_NAME="tasks"
+PROJECT_TITLE="tasks"
+STATUSES=("Todo" "In Progress" "Blocked" "Done")
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gh-tasks"
+CONFIG="$CONFIG_DIR/config.json"
+
+die() { echo "error: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+usage() {
+  cat <<'EOF'
+gh-tasks: personal GitHub task board (repo "tasks" + Project "tasks")
+
+Setup / health
+  gh-tasks setup                         create repo, board and statuses; write config (idempotent)
+  gh-tasks check                         verify gh account, token scope, config and repo access
+  gh-tasks project                       print the project name detected from the current dir
+
+Tasks  (P = project name; default: detected from the current dir)
+  gh-tasks create -t TITLE [-b BODY|-b -] [-p P] [-s STATUS]
+  gh-tasks list   [-p P | -a] [-s STATUS] [--closed]
+  gh-tasks show   N
+  gh-tasks move   N STATUS [-m COMMENT|-m -]
+  gh-tasks comment N -m TEXT | -m -
+  gh-tasks edit   N [-t TITLE] [-b BODY|-b -] [-p P]
+
+Context  (projects/<P>/CONTEXT.md in the tasks repo)
+  gh-tasks context     [-p P]            print it
+  gh-tasks context-add [-p P] < text     append a dated entry (stdin)
+  gh-tasks context-set [-p P] < text     replace the whole file (stdin)
+
+Browser
+  gh-tasks open [--here | -p P]          open the board (filtered by project if asked)
+
+STATUS: todo | in-progress | blocked | done (case-insensitive)
+"-" for -b / -m reads the text from stdin.
+EOF
+}
+
+# ---------- helpers ----------
+
+cfg() { jq -r "$1" "$CONFIG"; }
+
+load_config() {
+  [[ -f "$CONFIG" ]] || die "not configured. Run: gh-tasks setup"
+  OWNER=$(cfg .owner)
+  REPO="$OWNER/$REPO_NAME"
+  PNUM=$(cfg .project_number)
+  PID=$(cfg .project_id)
+  FID=$(cfg .status_field_id)
+  PURL=$(cfg .project_url)
+}
+
+# Fail fast if the active gh account is not the configured owner.
+require_account() {
+  local active
+  active=$(gh api user --jq .login 2>/dev/null) || die "gh is not authenticated. Run: gh auth login"
+  [[ "$active" == "$OWNER" ]] || die "active gh account is '$active' but the board belongs to '$OWNER'. Run: gh auth switch -u $OWNER"
+}
+
+detect_project() {
+  local name="" remote top
+  if [[ -n "${GH_TASKS_PROJECT:-}" ]]; then
+    name="$GH_TASKS_PROJECT"
+  elif top=$(git rev-parse --show-toplevel 2>/dev/null); then
+    remote=$(git config --get remote.origin.url 2>/dev/null || true)
+    if [[ -n "$remote" ]]; then
+      name=$(basename "${remote%.git}")
+    else
+      name=$(basename "$top")
+    fi
+  else
+    name=$(basename "$PWD")
+  fi
+  normalize_project "$name"
+}
+
+normalize_project() {
+  local p
+  p=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-' | sed -e 's/-\{2,\}/-/g' -e 's/^-//' -e 's/-$//')
+  [[ -n "$p" ]] || die "invalid project name: '$1'"
+  printf '%s' "$p"
+}
+
+normalize_status() {
+  local s
+  s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')
+  case "$s" in
+    todo) echo "Todo" ;;
+    inprogress|doing|wip|progress) echo "In Progress" ;;
+    blocked|block) echo "Blocked" ;;
+    done|closed|finished) echo "Done" ;;
+    *) die "unknown status '$1' (use: todo | in-progress | blocked | done)" ;;
+  esac
+}
+
+# Reads text from an option value; "-" means stdin.
+read_text() { if [[ "$1" == "-" ]]; then cat; else printf '%s' "$1"; fi; }
+
+issue_url() { echo "https://github.com/$REPO/issues/$1"; }
+
+# item-add is idempotent: it returns the existing item id if already on the board.
+item_id() {
+  gh project item-add "$PNUM" --owner "$OWNER" --url "$(issue_url "$1")" --format json --jq .id
+}
+
+set_status() { # item_id, canonical status
+  local oid
+  oid=$(jq -r --arg s "$2" '.status_options[$s] // empty' "$CONFIG")
+  [[ -n "$oid" ]] || die "status '$2' missing from config. Run: gh-tasks setup"
+  gh project item-edit --id "$1" --project-id "$PID" --field-id "$FID" --single-select-option-id "$oid" >/dev/null
+}
+
+ensure_label() {
+  gh label create "project:$1" -R "$REPO" --color 1d76db --description "Tasks for $1" --force >/dev/null
+}
+
+open_url() {
+  if command -v open >/dev/null 2>&1; then open "$1"
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1
+  else echo "$1"; fi
+}
+
+is_int() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "expected an issue number, got '${1:-}'"; }
+
+# ---------- commands ----------
+
+cmd_setup() {
+  need gh; need jq
+  local owner num pid fields status_field missing items opts_json
+  owner=$(gh api user --jq .login) || die "gh is not authenticated. Run: gh auth login"
+  echo "Setting up for GitHub account: $owner"
+  gh auth status --active 2>&1 | grep -q "'project'" \
+    || die "token lacks the 'project' scope. Run: gh auth refresh -s project"
+
+  if gh repo view "$owner/$REPO_NAME" >/dev/null 2>&1; then
+    echo "- repo $owner/$REPO_NAME exists"
+  else
+    gh repo create "$REPO_NAME" --private --add-readme --description "Personal task board" >/dev/null
+    echo "- created private repo $owner/$REPO_NAME"
+  fi
+  [[ "$(gh repo view "$owner/$REPO_NAME" --json isPrivate --jq .isPrivate)" == "true" ]] \
+    || echo "  WARNING: $owner/$REPO_NAME is PUBLIC"
+
+  num=$(gh project list --owner "$owner" -L 200 --format json \
+        --jq ".projects[] | select(.title==\"$PROJECT_TITLE\") | .number" | head -1)
+  if [[ -z "$num" ]]; then
+    num=$(gh project create --owner "$owner" --title "$PROJECT_TITLE" --format json --jq .number)
+    echo "- created project \"$PROJECT_TITLE\" (#$num)"
+  else
+    echo "- project \"$PROJECT_TITLE\" exists (#$num)"
+  fi
+  pid=$(gh project view "$num" --owner "$owner" --format json --jq .id)
+  gh project link "$num" --owner "$owner" --repo "$owner/$REPO_NAME" >/dev/null 2>&1 || true
+
+  fields=$(gh project field-list "$num" --owner "$owner" -L 100 --format json)
+  status_field=$(jq -c '.fields[] | select(.name=="Status")' <<<"$fields")
+  [[ -n "$status_field" ]] || die "board has no Status field"
+
+  missing=0
+  for s in "${STATUSES[@]}"; do
+    jq -e --arg s "$s" '.options | map(.name) | index($s)' <<<"$status_field" >/dev/null || missing=1
+  done
+  if (( missing )); then
+    items=$(gh project item-list "$num" --owner "$owner" -L 1 --format json --jq '.items | length')
+    if [[ "$items" == "0" ]]; then
+      opts_json='[{"name":"Todo","color":"GRAY","description":""},{"name":"In Progress","color":"YELLOW","description":""},{"name":"Blocked","color":"RED","description":""},{"name":"Done","color":"GREEN","description":""}]'
+      jq -n --arg id "$(jq -r .id <<<"$status_field")" --argjson opts "$opts_json" '{
+        query: "mutation($id:ID!,$opts:[ProjectV2SingleSelectFieldOptionInput!]){updateProjectV2Field(input:{fieldId:$id,singleSelectOptions:$opts}){projectV2Field{... on ProjectV2SingleSelectField{id}}}}",
+        variables: {id:$id, opts:$opts}}' | gh api graphql --input - >/dev/null
+      echo "- set statuses: ${STATUSES[*]}"
+      fields=$(gh project field-list "$num" --owner "$owner" -L 100 --format json)
+      status_field=$(jq -c '.fields[] | select(.name=="Status")' <<<"$fields")
+    else
+      die "the board already has items and is missing some of: ${STATUSES[*]}. Add the missing Status options in the board UI, then re-run: gh-tasks setup"
+    fi
+  else
+    echo "- statuses ok"
+  fi
+
+  mkdir -p "$CONFIG_DIR"
+  jq -n --arg owner "$owner" --argjson num "$num" --arg pid "$pid" \
+        --arg url "$(gh project view "$num" --owner "$owner" --format json --jq .url)" \
+        --argjson sf "$status_field" '{
+      owner:$owner, repo:"'"$REPO_NAME"'", project_number:$num, project_id:$pid, project_url:$url,
+      status_field_id:$sf.id,
+      status_options:($sf.options | map({(.name): .id}) | add)}' >"$CONFIG"
+  echo "- wrote $CONFIG"
+  echo "Done. Board: $(cfg .project_url)"
+}
+
+cmd_check() {
+  need gh; need jq
+  load_config
+  require_account
+  echo "ok  account: $OWNER"
+  gh auth status --active 2>&1 | grep -q "'project'" \
+    || die "token lacks the 'project' scope. Run: gh auth refresh -s project"
+  echo "ok  token has 'project' scope"
+  gh repo view "$REPO" >/dev/null 2>&1 || die "cannot access $REPO"
+  echo "ok  repo: $REPO"
+  gh project view "$PNUM" --owner "$OWNER" >/dev/null 2>&1 || die "cannot access project #$PNUM"
+  echo "ok  board: $PURL"
+  echo "    project here: $(detect_project)"
+}
+
+cmd_create() {
+  local title="" body="" project="" status="Todo" url num item
+  while (($#)); do
+    case "$1" in
+      -t|--title) title="$2"; shift 2 ;;
+      -b|--body) body=$(read_text "$2"); shift 2 ;;
+      -p|--project) project=$(normalize_project "$2"); shift 2 ;;
+      -s|--status) status=$(normalize_status "$2"); shift 2 ;;
+      *) die "create: unknown option '$1'" ;;
+    esac
+  done
+  [[ -n "$title" ]] || die "create: -t TITLE is required"
+  load_config; require_account
+  [[ -n "$project" ]] || project=$(detect_project)
+  ensure_label "$project"
+  url=$(gh issue create -R "$REPO" --title "$title" --body "$body" --label "project:$project")
+  num="${url##*/}"
+  item=$(item_id "$num")
+  set_status "$item" "$status"
+  echo "#$num  [$status]  $title  (project:$project)"
+  echo "$url"
+}
+
+cmd_list() {
+  local project="" all=0 status="" closed=0
+  while (($#)); do
+    case "$1" in
+      -p|--project) project=$(normalize_project "$2"); shift 2 ;;
+      -a|--all) all=1; shift ;;
+      -s|--status) status=$(normalize_status "$2"); shift 2 ;;
+      --closed) closed=1; shift ;;
+      *) die "list: unknown option '$1'" ;;
+    esac
+  done
+  load_config; require_account
+  (( all )) || [[ -n "$project" ]] || project=$(detect_project)
+  gh project item-list "$PNUM" --owner "$OWNER" -L 1000 --format json | jq -r \
+    --arg label "project:$project" --argjson all "$all" --arg status "$status" --argjson closed "$closed" '
+    ["Todo","In Progress","Blocked","Done"] as $order
+    | [.items[]
+       | select(.content.type == "Issue")
+       | select($all == 1 or ((.labels // []) | index($label)))
+       | select($status == "" or .status == $status)
+       | select($closed == 1 or $status == "Done" or .status != "Done")
+       | {n: .content.number, s: (.status // "No status"), t: .content.title,
+          p: ((.labels // []) | map(select(startswith("project:"))) | map(ltrimstr("project:")) | join(","))}]
+    | sort_by((.s as $s | $order | index($s)) // 9, .n)
+    | if length == 0 then "(no tasks)" else
+        .[] | "#\(.n)\t[\(.s)]\t\(.t)" + (if $all == 1 then "\t(\(.p))" else "" end)
+      end'
+}
+
+cmd_show() {
+  is_int "${1:-}"; load_config; require_account
+  gh issue view "$1" -R "$REPO" --comments
+}
+
+cmd_move() {
+  local n="${1:-}" status msg="" item state
+  is_int "$n"; [[ -n "${2:-}" ]] || die "move: STATUS is required"
+  status=$(normalize_status "$2"); shift 2
+  while (($#)); do
+    case "$1" in
+      -m|--message) msg=$(read_text "$2"); shift 2 ;;
+      *) die "move: unknown option '$1'" ;;
+    esac
+  done
+  load_config; require_account
+  item=$(item_id "$n")
+  set_status "$item" "$status"
+  state=$(gh issue view "$n" -R "$REPO" --json state --jq .state)
+  if [[ "$status" == "Done" && "$state" == "OPEN" ]]; then
+    gh issue close "$n" -R "$REPO" >/dev/null 2>&1
+  elif [[ "$status" != "Done" && "$state" == "CLOSED" ]]; then
+    gh issue reopen "$n" -R "$REPO" >/dev/null 2>&1
+  fi
+  [[ -z "$msg" ]] || gh issue comment "$n" -R "$REPO" --body "$msg" >/dev/null
+  echo "#$n -> $status$([[ -n "$msg" ]] && echo " (commented)")"
+  issue_url "$n"
+}
+
+cmd_comment() {
+  local n="${1:-}" msg=""
+  is_int "$n"; shift
+  while (($#)); do
+    case "$1" in
+      -m|--message) msg=$(read_text "$2"); shift 2 ;;
+      *) die "comment: unknown option '$1'" ;;
+    esac
+  done
+  [[ -n "$msg" ]] || die "comment: -m TEXT (or -m - for stdin) is required"
+  load_config; require_account
+  gh issue comment "$n" -R "$REPO" --body "$msg"
+}
+
+cmd_edit() {
+  local n="${1:-}" title="" body="" has_body=0 project="" args=() old
+  is_int "$n"; shift
+  while (($#)); do
+    case "$1" in
+      -t|--title) title="$2"; shift 2 ;;
+      -b|--body) body=$(read_text "$2"); has_body=1; shift 2 ;;
+      -p|--project) project=$(normalize_project "$2"); shift 2 ;;
+      *) die "edit: unknown option '$1'" ;;
+    esac
+  done
+  load_config; require_account
+  [[ -n "$title" ]] && args+=(--title "$title")
+  (( has_body )) && args+=(--body "$body")
+  if [[ -n "$project" ]]; then
+    ensure_label "$project"
+    while IFS= read -r old; do
+      [[ -n "$old" && "$old" != "project:$project" ]] && args+=(--remove-label "$old")
+    done < <(gh issue view "$n" -R "$REPO" --json labels --jq '.labels[].name | select(startswith("project:"))')
+    args+=(--add-label "project:$project")
+  fi
+  (( ${#args[@]} )) || die "edit: nothing to change (use -t, -b or -p)"
+  gh issue edit "$n" -R "$REPO" "${args[@]}"
+}
+
+context_path() { echo "projects/$1/CONTEXT.md"; }
+
+# gh api prints the error body on stdout for a 404, so only keep output on success.
+api_or_empty() { local out; if out=$(gh api "$@" 2>/dev/null); then printf '%s' "$out"; fi; }
+
+context_get() { # project -> prints file or nothing
+  api_or_empty -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/$(context_path "$1")"
+}
+
+context_put() { # project, content, message
+  local path sha args
+  path=$(context_path "$1")
+  sha=$(api_or_empty "repos/$REPO/contents/$path" --jq .sha)
+  args=(-X PUT "repos/$REPO/contents/$path" -f message="$3" -f content="$(printf '%s' "$2" | base64 | tr -d '\n')")
+  [[ -n "$sha" ]] && args+=(-f sha="$sha")
+  gh api "${args[@]}" --jq .content.html_url
+}
+
+parse_project_only() {
+  PROJECT=""
+  while (($#)); do
+    case "$1" in
+      -p|--project) PROJECT=$(normalize_project "$2"); shift 2 ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+  [[ -n "$PROJECT" ]] || PROJECT=$(detect_project)
+}
+
+cmd_context() {
+  parse_project_only "$@"; load_config; require_account
+  local c; c=$(context_get "$PROJECT")
+  if [[ -z "$c" ]]; then echo "(no context yet for project:$PROJECT)"; else printf '%s\n' "$c"; fi
+}
+
+cmd_context_add() {
+  parse_project_only "$@"; load_config; require_account
+  local entry current new
+  entry=$(cat)
+  [[ -n "${entry//[[:space:]]/}" ]] || die "context-add: empty input on stdin"
+  current=$(context_get "$PROJECT")
+  [[ -n "$current" ]] || current="# $PROJECT"
+  new=$(printf '%s\n\n## %s\n\n%s\n' "$current" "$(date '+%Y-%m-%d %H:%M')" "$entry")
+  context_put "$PROJECT" "$new" "context($PROJECT): add entry"
+}
+
+cmd_context_set() {
+  parse_project_only "$@"; load_config; require_account
+  local content
+  content=$(cat)
+  [[ -n "${content//[[:space:]]/}" ]] || die "context-set: empty input on stdin"
+  context_put "$PROJECT" "$content"$'\n' "context($PROJECT): rewrite"
+}
+
+cmd_open() {
+  local project="" url q
+  while (($#)); do
+    case "$1" in
+      --here) project=$(detect_project); shift ;;
+      -p|--project) project=$(normalize_project "$2"); shift 2 ;;
+      *) die "open: unknown option '$1'" ;;
+    esac
+  done
+  load_config
+  url="$PURL"
+  if [[ -n "$project" ]]; then
+    q=$(jq -rn --arg q "label:\"project:$project\"" '$q | @uri')
+    url="$url?filterQuery=$q"
+  fi
+  open_url "$url"
+  echo "$url"
+}
+
+cmd_project() { detect_project; echo; }
+
+# ---------- dispatch ----------
+
+need gh; need jq
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  setup) cmd_setup "$@" ;;
+  check) cmd_check "$@" ;;
+  project) cmd_project "$@" ;;
+  create|new) cmd_create "$@" ;;
+  list|ls) cmd_list "$@" ;;
+  show|view) cmd_show "$@" ;;
+  move|mv|status) cmd_move "$@" ;;
+  comment) cmd_comment "$@" ;;
+  edit) cmd_edit "$@" ;;
+  context) cmd_context "$@" ;;
+  context-add) cmd_context_add "$@" ;;
+  context-set) cmd_context_set "$@" ;;
+  open) cmd_open "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac
