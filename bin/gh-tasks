@@ -29,11 +29,15 @@ Setup / health  (setup runs automatically on first use)
 
 Tasks  (P = project name; default: detected from the current dir)
   gh-tasks create -t TITLE [-b BODY|-b -] [-p P] [-s STATUS]
-  gh-tasks list   [-p P | -a] [-s STATUS] [--closed]
+  gh-tasks list   [-p P | -a] [-s STATUS] [--closed] [--updated] [--json]
   gh-tasks show   N
   gh-tasks move   N STATUS [-m COMMENT|-m -]
   gh-tasks comment N -m TEXT | -m -
   gh-tasks edit   N [-t TITLE] [-b BODY|-b -] [-p P]
+
+Updates  (label "updated": news found by a brief; the task keeps its column)
+  gh-tasks flag N -m TEXT | -m -         comment what changed and add the "updated" label
+  gh-tasks seen N... | -a                remove the label (moving a task also removes it)
 
 Context  (projects/<P>/CONTEXT.md in the tasks repo)
   gh-tasks context     [-p P]            print it
@@ -41,7 +45,7 @@ Context  (projects/<P>/CONTEXT.md in the tasks repo)
   gh-tasks context-set [-p P] < text     replace the whole file (stdin)
 
 Browser
-  gh-tasks open [--here | -p P]          open the board (filtered by project if asked)
+  gh-tasks open [--here | -p P] [--updated]   open the board (optionally filtered)
 
 STATUS: todo | in-progress | blocked | review | done (case-insensitive)
 "-" for -b / -m reads the text from stdin.
@@ -133,6 +137,11 @@ ensure_label() {
   gh label create "project:$1" -R "$REPO" --color 1d76db --description "Tasks for $1" --force >/dev/null
 }
 
+UPDATED_LABEL="updated"
+ensure_updated_label() { # repo
+  gh label create "$UPDATED_LABEL" -R "$1" --color fbca04 --description "News found by a brief; not seen yet" --force >/dev/null
+}
+
 open_url() {
   if command -v open >/dev/null 2>&1; then open "$1"
   elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1
@@ -217,6 +226,8 @@ cmd_setup() {
       status_field_id:$sf.id,
       status_options:($sf.options | map({(.name): .id}) | add)}' >"$CONFIG"
   echo "- wrote $CONFIG"
+  ensure_updated_label "$owner/$REPO_NAME"
+  echo "- label \"$UPDATED_LABEL\" ok"
   echo "Done. Board: $(cfg .project_url)"
 }
 
@@ -259,32 +270,80 @@ cmd_create() {
 }
 
 cmd_list() {
-  local project="" all=0 status="" closed=0
+  local project="" all=0 status="" closed=0 updated=0 json=0
   while (($#)); do
     case "$1" in
       -p|--project) project=$(normalize_project "$2"); shift 2 ;;
       -a|--all) all=1; shift ;;
       -s|--status) status=$(normalize_status "$2"); shift 2 ;;
       --closed) closed=1; shift ;;
+      --updated) updated=1; shift ;;
+      --json) json=1; shift ;;
       *) die "list: unknown option '$1'" ;;
     esac
   done
   load_config; require_account
   (( all )) || [[ -n "$project" ]] || project=$(detect_project)
   gh project item-list "$PNUM" --owner "$OWNER" -L 1000 --format json | jq -r \
-    --arg label "project:$project" --argjson all "$all" --arg status "$status" --argjson closed "$closed" --argjson status_spec "$STATUS_SPEC" '
+    --arg label "project:$project" --argjson all "$all" --arg status "$status" --argjson closed "$closed" \
+    --argjson updated "$updated" --argjson json "$json" --arg ulabel "$UPDATED_LABEL" --argjson status_spec "$STATUS_SPEC" '
     ($status_spec | map(.name)) as $order
     | [.items[]
        | select(.content.type == "Issue")
        | select($all == 1 or ((.labels // []) | index($label)))
        | select($status == "" or .status == $status)
        | select($closed == 1 or $status == "Done" or .status != "Done")
-       | {n: .content.number, s: (.status // "No status"), t: .content.title,
-          p: ((.labels // []) | map(select(startswith("project:"))) | map(ltrimstr("project:")) | join(","))}]
-    | sort_by((.s as $s | $order | index($s)) // 9, .n)
-    | if length == 0 then "(no tasks)" else
-        .[] | "#\(.n)\t[\(.s)]\t\(.t)" + (if $all == 1 then "\t(\(.p))" else "" end)
+       | {number: .content.number, status: (.status // "No status"), title: .content.title,
+          project: ((.labels // []) | map(select(startswith("project:"))) | map(ltrimstr("project:")) | join(",")),
+          updated: ((.labels // []) | index($ulabel) != null),
+          url: .content.url, body: .content.body}
+       | select($updated == 0 or .updated)]
+    | sort_by((.status as $s | $order | index($s)) // 9, .number)
+    | if $json == 1 then .
+      elif length == 0 then "(no tasks)"
+      else .[] | "#\(.number)\t[\(.status)]" + (if .updated then " *updated*" else "" end)
+                 + "\t\(.title)" + (if $all == 1 then "\t(\(.project))" else "" end)
       end'
+}
+
+cmd_flag() {
+  local n="${1:-}" msg=""
+  is_int "$n"; shift
+  while (($#)); do
+    case "$1" in
+      -m|--message) msg=$(read_text "$2"); shift 2 ;;
+      *) die "flag: unknown option '$1'" ;;
+    esac
+  done
+  [[ -n "$msg" ]] || die "flag: -m TEXT (or -m - for stdin) is required: say what changed"
+  load_config; require_account
+  gh issue comment "$n" -R "$REPO" --body "$msg" >/dev/null
+  gh issue edit "$n" -R "$REPO" --add-label "$UPDATED_LABEL" >/dev/null
+  echo "#$n flagged as updated"
+  issue_url "$n"
+}
+
+cmd_seen() {
+  local nums=() n
+  while (($#)); do
+    case "$1" in
+      -a|--all) nums=(ALL); shift ;;
+      *) is_int "$1"; nums+=("$1"); shift ;;
+    esac
+  done
+  (( ${#nums[@]} )) || die "seen: give issue numbers or -a"
+  load_config; require_account
+  if [[ "${nums[0]}" == "ALL" ]]; then
+    nums=()
+    while IFS= read -r n; do [[ -n "$n" ]] && nums+=("$n"); done \
+      < <(gh project item-list "$PNUM" --owner "$OWNER" -L 1000 --format json \
+            --jq ".items[] | select((.labels // []) | index(\"$UPDATED_LABEL\")) | .content.number")
+  fi
+  for n in "${nums[@]}"; do
+    gh issue edit "$n" -R "$REPO" --remove-label "$UPDATED_LABEL" >/dev/null 2>&1 || true
+    echo "#$n seen"
+  done
+  (( ${#nums[@]} )) || echo "(nothing flagged)"
 }
 
 cmd_show() {
@@ -312,6 +371,8 @@ cmd_move() {
     gh issue reopen "$n" -R "$REPO" >/dev/null 2>&1
   fi
   [[ -z "$msg" ]] || gh issue comment "$n" -R "$REPO" --body "$msg" >/dev/null
+  # Moving a task means the user acted on it, so any "updated" flag is cleared.
+  gh issue edit "$n" -R "$REPO" --remove-label "$UPDATED_LABEL" >/dev/null 2>&1 || true
   echo "#$n -> $status$([[ -n "$msg" ]] && echo " (commented)")"
   issue_url "$n"
 }
@@ -410,19 +471,21 @@ cmd_context_set() {
 }
 
 cmd_open() {
-  local project="" url q
+  local project="" updated=0 url filter=""
   while (($#)); do
     case "$1" in
       --here) project=$(detect_project); shift ;;
       -p|--project) project=$(normalize_project "$2"); shift 2 ;;
+      --updated) updated=1; shift ;;
       *) die "open: unknown option '$1'" ;;
     esac
   done
   load_config
   url="$PURL"
-  if [[ -n "$project" ]]; then
-    q=$(jq -rn --arg q "label:\"project:$project\"" '$q | @uri')
-    url="$url?filterQuery=$q"
+  [[ -n "$project" ]] && filter="label:\"project:$project\""
+  (( updated )) && filter="${filter:+$filter }label:$UPDATED_LABEL"
+  if [[ -n "$filter" ]]; then
+    url="$url?filterQuery=$(jq -rn --arg q "$filter" '$q | @uri')"
   fi
   open_url "$url"
   echo "$url"
@@ -481,6 +544,8 @@ case "$cmd" in
   context-set) cmd_context_set "$@" ;;
   open) cmd_open "$@" ;;
   share) cmd_share "$@" ;;
+  flag) cmd_flag "$@" ;;
+  seen) cmd_seen "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 1 ;;
 esac

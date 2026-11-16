@@ -8,6 +8,7 @@ argument-hint: "[what needs to be done]"
 Create one task from `$ARGUMENTS` (plus the current conversation if it adds needed detail).
 
 1. Write a short imperative title (max ~70 chars) and a brief body: what and why, plus a checklist if there are clear steps. Keep the user's language. Don't invent scope.
+   If the arguments or conversation mention PRs, Jira keys, Slack threads or other URLs, end the body with a `## Links` section listing them, one per line. Scheduled briefs use these links to find updates for the task. Don't invent links.
 2. Run exactly this, filling in TITLE and BODY. Do not run any other gh command and do not debug: if it fails, show the error line to the user and stop.
 
 ```bash

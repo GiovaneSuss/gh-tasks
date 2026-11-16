@@ -51,10 +51,18 @@ Or turn on auto-update once: `/plugin` → Marketplaces → ghtasks → Enable a
 | Slash command | What it does |
 |---|---|
 | `/ghtasks:create-task <what>` | Creates an issue in Todo, tagged with the current project |
-| `/ghtasks:tasks-open [here\|name]` | Opens the board in the browser |
+| `/ghtasks:tasks-open [here\|updated\|name]` | Opens the board in the browser |
 | `/ghtasks:tasks ...` | Lists, moves, comments and keeps the project context |
+| `/ghtasks:tasks-sync [project...]` | For scheduled briefs: flags tasks that have news |
 
-`create-task` and `tasks-open` are user-only (`disable-model-invocation`), so they cost no context until you call them.
+`create-task`, `tasks-open` and `tasks-sync` are user-only (`disable-model-invocation`), so they cost no context until you call them.
+
+## Updates from scheduled briefs
+
+A morning brief in each Claude environment (one with Qdrant tools, one with RapidCanvas, and so on) can run `/ghtasks:tasks-sync`, optionally limited to that environment's projects (`/ghtasks:tasks-sync qdrant-testing other-project`). For each open task it looks for news in the tools it has, starting from the task's `## Links` section. When it finds something, it comments what changed and adds the `updated` label. The task stays in its column; a column change is only suggested in the comment.
+
+- See what changed: `/ghtasks:tasks-open updated`, or ask "what changed?".
+- Clear it: "I saw #7" (`gh-tasks seen 7`, or `seen -a` for all). Moving a task clears it too.
 
 ## Layout
 
